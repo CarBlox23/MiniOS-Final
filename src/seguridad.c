@@ -10,7 +10,7 @@
 #define ARCH_MATRIZ DIR_DATOS "matriz.dat"
 
 static unsigned char matriz[NUM_ROLES][NUM_OBJETOS] = {
-    /* ROL_ADMIN    */ { D_CREATE|D_READ|D_UPDATE|D_DELETE, D_EXEC, D_READ,
+    /* ROL_ADMIN    */ { D_CREATE|D_READ|D_UPDATE|D_DELETE, D_EXEC, D_CREATE|D_READ|D_UPDATE|D_DELETE,
                          D_READ|D_UPDATE|D_DELETE|D_EXEC, D_READ|D_UPDATE, D_EXEC },
     /* ROL_OPERADOR */ { D_CREATE|D_READ|D_UPDATE,          D_EXEC, D_CREATE|D_READ|D_UPDATE,
                          D_READ|D_UPDATE|D_DELETE|D_EXEC, D_READ,          0      },
@@ -45,7 +45,9 @@ Rol seg_rol_actual(void) {
 int seg_verificar(Objeto obj, unsigned char derecho) {
     if (rol_actual < 0) return 0;
     if ((matriz[rol_actual][obj] & derecho) == derecho) return 1;
-    printf("  ACCESO DENEGADO (Derechos insuficientes en matriz de acceso)\n");
+    const char *nombre_obj = (obj >= 0 && obj < NUM_OBJETOS) ? NOMBRE_OBJ[obj] : "desconocido";
+    printf("  ACCESO DENEGADO: Derechos insuficientes para '%s' sobre objeto '%s'\n",
+           seg_usuario_actual(), nombre_obj);
     return 0;
 }
 
@@ -114,6 +116,7 @@ void seg_modificar_matriz(void) {
     if (r < 0 || r >= NUM_ROLES) { printf("Rol inválido.\n"); return; }
     int o = leer_entero("Objeto (0=reg, 1=juego, 2=partida, 3=proc, 4=matriz, 5=sistema): ");
     if (o < 0 || o >= NUM_OBJETOS) { printf("Objeto inválido.\n"); return; }
+    printf("Modificando derechos de rol '%s' sobre objeto '%s'...\n", NOMBRE_ROL[r], NOMBRE_OBJ[o]);
     printf("Introduzca nuevos derechos en bits (Suma: C=1, R=2, U=4, D=8, X=16 | 0=Ninguno):\n");
     int bits = leer_entero("Valor decimal de derechos: ");
     if (bits < 0 || bits > 31) { printf("Valor de derechos inválido.\n"); return; }

@@ -142,10 +142,10 @@ void proc_menu(void) {
         printf(" 0. Volver al Menú Principal\n");
         switch (leer_entero(" Opción procesos: ")) {
             case 1:
-                if (seg_verificar(OBJ_PROCESOS, D_EXEC)) proc_lanzar("tetris-bsd");
+                if (seg_verificar(OBJ_JUEGOS, D_EXEC)) proc_lanzar("tetris-bsd");
                 break;
             case 2:
-                if (seg_verificar(OBJ_PROCESOS, D_EXEC)) proc_lanzar("snake");
+                if (seg_verificar(OBJ_JUEGOS, D_EXEC)) proc_lanzar("snake");
                 break;
             case 3:
                 if (seg_verificar(OBJ_PROCESOS, D_READ)) proc_listar();

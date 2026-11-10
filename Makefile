@@ -12,6 +12,9 @@ build/%.o: src/%.c include/*.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -rf build minios datos/minios.disk datos/partida_*.sav
+	rm -rf build minios
 
-.PHONY: clean
+distclean: clean
+	rm -rf datos/minios.disk datos/partida_*.sav datos/matriz.dat
+
+.PHONY: clean distclean

@@ -18,16 +18,11 @@
 
 static struct termios original;
 static int en_modo_raw = 0;
-static Partida partida_activa;
+static volatile sig_atomic_t g_sigint_recibido = 0;
 
 static void manejador_sigint_juego(int sig) {
     (void)sig;
-    if (en_modo_raw) {
-        guardar_partida(&partida_activa);
-        modo_juego(0);
-        printf("\n[Partida auto-guardada ante interrupción Ctrl+C]\n");
-    }
-    exit(0);
+    g_sigint_recibido = 1;
 }
 
 void modo_juego(int activar) {
@@ -38,6 +33,7 @@ void modo_juego(int activar) {
             t.c_lflag &= ~(ICANON | ECHO);
             tcsetattr(STDIN_FILENO, TCSANOW, &t);
             en_modo_raw = 1;
+            g_sigint_recibido = 0;
             signal(SIGINT, manejador_sigint_juego);
         }
     } else {
@@ -109,23 +105,57 @@ static void dibujar_juego(const Partida *p) {
         printf("#\n");
     }
     for (int i = 0; i < ANCHO + 2; i++) printf("#");
-    printf("\n[W/A/S/D]: Mover | [G]: Guardar y Salir | [Q]: Salir\n");
+    printf("\n[W/A/S/D]: Mover | [G]: Guardar y Salir | [Q]: Salir sin guardar\n");
 }
 
 static void ejecutar_partida(Partida *p) {
     modo_juego(1);
-    partida_activa = *p;
     while (1) {
-        dibujar_juego(p);
-        int c = tecla(180);
-        if (c == 'q' || c == 'Q') break;
-        if (c == 'g' || c == 'G') {
-            p->guardada_en = time(NULL);
-            guardar_partida(p);
+        if (g_sigint_recibido) {
             modo_juego(0);
-            printf("\nPartida guardada con éxito en datos/partida_%s.sav\n", p->jugador);
+            printf("\n\n[MiniOS] Interrupción detectada (Ctrl+C). Saliendo del juego...\n");
+            if (seg_verificar(OBJ_PARTIDAS, D_CREATE | D_UPDATE)) {
+                p->guardada_en = time(NULL);
+                if (guardar_partida(p) == 0) {
+                    printf("[MiniOS] Partida auto-guardada exitosamente en datos/partida_%s.sav\n", p->jugador);
+                } else {
+                    printf("[MiniOS] Error al intentar guardar la partida.\n");
+                }
+            } else {
+                printf("[MiniOS] Aviso: El rol actual no posee permisos para guardar partidas (partida no guardada).\n");
+            }
             return;
         }
+
+        dibujar_juego(p);
+        int c = tecla(180);
+
+        if (g_sigint_recibido) continue;
+        if (c == 'q' || c == 'Q') break;
+
+        if (c == 'g' || c == 'G') {
+            if (!seg_verificar(OBJ_PARTIDAS, D_CREATE | D_UPDATE)) {
+                modo_juego(0);
+                printf("\n\n  ACCESO DENEGADO: El usuario '%s' no tiene derechos para guardar partidas en disco.\n",
+                       seg_usuario_actual());
+                printf("  Presione [ENTER] para reanudar el juego o luego 'Q' para salir sin guardar...\n");
+                char tmp[16];
+                leer_linea("", tmp, sizeof(tmp));
+                modo_juego(1);
+                continue;
+            }
+            p->guardada_en = time(NULL);
+            if (guardar_partida(p) == 0) {
+                modo_juego(0);
+                printf("\nPartida guardada con éxito en datos/partida_%s.sav\n", p->jugador);
+                return;
+            } else {
+                modo_juego(0);
+                printf("\nError al guardar la partida en disco.\n");
+                return;
+            }
+        }
+
         if ((c == 'w' || c == 'W') && p->direccion != 1) p->direccion = 0;
         if ((c == 's' || c == 'S') && p->direccion != 0) p->direccion = 1;
         if ((c == 'a' || c == 'A') && p->direccion != 3) p->direccion = 2;
@@ -142,7 +172,12 @@ static void ejecutar_partida(Partida *p) {
             p->cuerpo[0].y < 0 || p->cuerpo[0].y >= ALTO) {
             modo_juego(0);
             printf("\n¡GAME OVER! Has chocado contra el muro. Puntaje final: %d\n", p->puntaje);
-            fs_registrar_record(p->jugador, p->puntaje);
+            if (seg_verificar(OBJ_REGISTROS, D_CREATE)) {
+                fs_registrar_record(p->jugador, p->puntaje);
+                printf("[MiniOS] Récord registrado con éxito en disco virtual.\n");
+            } else {
+                printf("[MiniOS] Récord no guardado: Rol sin permisos de creación en disco virtual.\n");
+            }
             char ruta[128];
             snprintf(ruta, sizeof ruta, "datos/partida_%s.sav", p->jugador);
             unlink(ruta);
@@ -156,8 +191,6 @@ static void ejecutar_partida(Partida *p) {
             p->comida.x = rand() % ANCHO;
             p->comida.y = rand() % ALTO;
         }
-
-        partida_activa = *p;
     }
     modo_juego(0);
 }
