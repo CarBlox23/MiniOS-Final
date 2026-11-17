@@ -8,10 +8,12 @@
 #include <sys/stat.h>
 #include <signal.h>
 #include <time.h>
+#include <pthread.h>
 #include "kernel.h"
 #include "juego.h"
 #include "fs.h"
 #include "seguridad.h"
+#include "bitacora.h"
 
 #define ANCHO 20
 #define ALTO  12
@@ -19,6 +21,11 @@
 static struct termios original;
 static int en_modo_raw = 0;
 static volatile sig_atomic_t g_sigint_recibido = 0;
+
+/* Estado compartido protegido para autoguardado concurrente (Mejora 9.1) */
+static Partida         partida;
+static pthread_mutex_t mutex_partida = PTHREAD_MUTEX_INITIALIZER;
+static volatile int    jugando = 0;
 
 static void manejador_sigint_juego(int sig) {
     (void)sig;
@@ -60,9 +67,10 @@ int tecla(int ms) {
 int guardar_partida(const Partida *p) {
     char ruta[128];
     mkdir("datos", 0755);
-    snprintf(ruta, sizeof ruta, "datos/partida_%s.sav", p->jugador);
+    snprintf(ruta, sizeof ruta, DIR_DATOS "partida_%s.sav", p->jugador);
     int fd = open(ruta, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (fd < 0) return -1;
+    chmod(ruta, 0600);
     ssize_t n = write(fd, p, sizeof *p);
     fsync(fd);
     close(fd);
@@ -71,7 +79,7 @@ int guardar_partida(const Partida *p) {
 
 int cargar_partida(const char *jugador, Partida *p) {
     char ruta[128];
-    snprintf(ruta, sizeof ruta, "datos/partida_%s.sav", jugador);
+    snprintf(ruta, sizeof ruta, DIR_DATOS "partida_%s.sav", jugador);
     int fd = open(ruta, O_RDONLY);
     if (fd < 0) return -1;
     ssize_t n = read(fd, p, sizeof *p);
@@ -79,9 +87,30 @@ int cargar_partida(const char *jugador, Partida *p) {
     return n == (ssize_t)sizeof *p ? 0 : -1;
 }
 
+/* Hilo de autoguardado concurrente cada 15 segundos (Mejora 9.1) */
+static void *hilo_autoguardado(void *arg) {
+    int segundos = *(int *)arg;
+    while (jugando) {
+        for (int i = 0; i < segundos && jugando; i++) {
+            sleep(1);
+        }
+        if (!jugando) break;
+
+        Partida copia;
+        pthread_mutex_lock(&mutex_partida);     /* Sección crítica: lectura atómica del estado */
+        copia = partida;
+        pthread_mutex_unlock(&mutex_partida);
+
+        copia.guardada_en = time(NULL);
+        guardar_partida(&copia);                /* Escritura I/O fuera del cerrojo para fluidez */
+    }
+    return NULL;
+}
+
 static void dibujar_juego(const Partida *p) {
     printf("\033[H\033[J");
-    printf("=== SNAKE MINIOS v3.0 | Jugador: %s | Puntos: %d ===\n", p->jugador, p->puntaje);
+    printf("=== SNAKE MINIOS v3.0 | Jugador: %s | Puntos: %d (Autoguardado: Activo cada 15s) ===\n",
+           p->jugador, p->puntaje);
     for (int i = 0; i < ANCHO + 2; i++) printf("#");
     printf("\n");
     for (int y = 0; y < ALTO; y++) {
@@ -109,90 +138,132 @@ static void dibujar_juego(const Partida *p) {
 }
 
 static void ejecutar_partida(Partida *p) {
+    pthread_mutex_lock(&mutex_partida);
+    partida = *p;
+    pthread_mutex_unlock(&mutex_partida);
+
+    /* Iniciar hilo concurrente de autoguardado */
+    int cada = 15;
+    pthread_t hilo;
+    jugando = 1;
+    pthread_create(&hilo, NULL, hilo_autoguardado, &cada);
+
     modo_juego(1);
     while (1) {
         if (g_sigint_recibido) {
             modo_juego(0);
+            jugando = 0;
+            pthread_join(hilo, NULL);
             printf("\n\n[MiniOS] Interrupción detectada (Ctrl+C). Saliendo del juego...\n");
             if (seg_verificar(OBJ_PARTIDAS, D_CREATE | D_UPDATE)) {
-                p->guardada_en = time(NULL);
-                if (guardar_partida(p) == 0) {
-                    printf("[MiniOS] Partida auto-guardada exitosamente en datos/partida_%s.sav\n", p->jugador);
-                } else {
-                    printf("[MiniOS] Error al intentar guardar la partida.\n");
+                pthread_mutex_lock(&mutex_partida);
+                partida.guardada_en = time(NULL);
+                Partida copia = partida;
+                pthread_mutex_unlock(&mutex_partida);
+                if (guardar_partida(&copia) == 0) {
+                    printf("[MiniOS] Partida auto-guardada exitosamente en datos/partida_%s.sav\n", copia.jugador);
+                    auditar("AUTOGUARDADO_SIGINT", copia.jugador, "OK");
                 }
             } else {
-                printf("[MiniOS] Aviso: El rol actual no posee permisos para guardar partidas (partida no guardada).\n");
+                printf("[MiniOS] Aviso: Rol actual sin permisos para guardar partidas.\n");
             }
             return;
         }
 
-        dibujar_juego(p);
+        Partida copia_dibujo;
+        pthread_mutex_lock(&mutex_partida);
+        copia_dibujo = partida;
+        pthread_mutex_unlock(&mutex_partida);
+
+        dibujar_juego(&copia_dibujo);
         int c = tecla(180);
 
         if (g_sigint_recibido) continue;
-        if (c == 'q' || c == 'Q') break;
+
+        if (c == 'q' || c == 'Q') {
+            break;
+        }
 
         if (c == 'g' || c == 'G') {
             if (!seg_verificar(OBJ_PARTIDAS, D_CREATE | D_UPDATE)) {
                 modo_juego(0);
                 printf("\n\n  ACCESO DENEGADO: El usuario '%s' no tiene derechos para guardar partidas en disco.\n",
                        seg_usuario_actual());
-                printf("  Presione [ENTER] para reanudar el juego o luego 'Q' para salir sin guardar...\n");
+                printf("  Presione [ENTER] para reanudar el juego o 'Q' para salir sin guardar...\n");
                 char tmp[16];
-                leer_linea("", tmp, sizeof(tmp));
+                leer_linea("", tmp, sizeof tmp);
                 modo_juego(1);
                 continue;
             }
-            p->guardada_en = time(NULL);
-            if (guardar_partida(p) == 0) {
-                modo_juego(0);
-                printf("\nPartida guardada con éxito en datos/partida_%s.sav\n", p->jugador);
-                return;
+            modo_juego(0);
+            jugando = 0;
+            pthread_join(hilo, NULL);
+
+            pthread_mutex_lock(&mutex_partida);
+            partida.guardada_en = time(NULL);
+            Partida copia = partida;
+            pthread_mutex_unlock(&mutex_partida);
+
+            if (guardar_partida(&copia) == 0) {
+                printf("\nPartida guardada con éxito en datos/partida_%s.sav\n", copia.jugador);
+                auditar("GUARDAR_PARTIDA", copia.jugador, "OK");
             } else {
-                modo_juego(0);
                 printf("\nError al guardar la partida en disco.\n");
-                return;
             }
+            return;
         }
 
-        if ((c == 'w' || c == 'W') && p->direccion != 1) p->direccion = 0;
-        if ((c == 's' || c == 'S') && p->direccion != 0) p->direccion = 1;
-        if ((c == 'a' || c == 'A') && p->direccion != 3) p->direccion = 2;
-        if ((c == 'd' || c == 'D') && p->direccion != 2) p->direccion = 3;
+        pthread_mutex_lock(&mutex_partida);
+        if ((c == 'w' || c == 'W') && partida.direccion != 1) partida.direccion = 0;
+        if ((c == 's' || c == 'S') && partida.direccion != 0) partida.direccion = 1;
+        if ((c == 'a' || c == 'A') && partida.direccion != 3) partida.direccion = 2;
+        if ((c == 'd' || c == 'D') && partida.direccion != 2) partida.direccion = 3;
 
-        for (int i = p->largo - 1; i > 0; i--) p->cuerpo[i] = p->cuerpo[i - 1];
-        if (p->direccion == 0) p->cuerpo[0].y--;
-        if (p->direccion == 1) p->cuerpo[0].y++;
-        if (p->direccion == 2) p->cuerpo[0].x--;
-        if (p->direccion == 3) p->cuerpo[0].x++;
+        for (int i = partida.largo - 1; i > 0; i--) partida.cuerpo[i] = partida.cuerpo[i - 1];
+        if (partida.direccion == 0) partida.cuerpo[0].y--;
+        if (partida.direccion == 1) partida.cuerpo[0].y++;
+        if (partida.direccion == 2) partida.cuerpo[0].x--;
+        if (partida.direccion == 3) partida.cuerpo[0].x++;
 
-        // Colisión con paredes
-        if (p->cuerpo[0].x < 0 || p->cuerpo[0].x >= ANCHO ||
-            p->cuerpo[0].y < 0 || p->cuerpo[0].y >= ALTO) {
+        /* Colisión con bordes */
+        if (partida.cuerpo[0].x < 0 || partida.cuerpo[0].x >= ANCHO ||
+            partida.cuerpo[0].y < 0 || partida.cuerpo[0].y >= ALTO) {
+            int puntaje_final = partida.puntaje;
+            char jugador_fin[32];
+            strncpy(jugador_fin, partida.jugador, sizeof(jugador_fin) - 1);
+            jugador_fin[sizeof(jugador_fin) - 1] = '\0';
+            pthread_mutex_unlock(&mutex_partida);
+
             modo_juego(0);
-            printf("\n¡GAME OVER! Has chocado contra el muro. Puntaje final: %d\n", p->puntaje);
+            jugando = 0;
+            pthread_join(hilo, NULL);
+
+            printf("\n¡GAME OVER! Has chocado contra el muro. Puntaje final: %d\n", puntaje_final);
             if (seg_verificar(OBJ_REGISTROS, D_CREATE)) {
-                fs_registrar_record(p->jugador, p->puntaje);
+                fs_registrar_record(jugador_fin, puntaje_final);
                 printf("[MiniOS] Récord registrado con éxito en disco virtual.\n");
             } else {
                 printf("[MiniOS] Récord no guardado: Rol sin permisos de creación en disco virtual.\n");
             }
             char ruta[128];
-            snprintf(ruta, sizeof ruta, "datos/partida_%s.sav", p->jugador);
+            snprintf(ruta, sizeof ruta, DIR_DATOS "partida_%s.sav", jugador_fin);
             unlink(ruta);
             return;
         }
 
-        // Colisión con comida
-        if (p->cuerpo[0].x == p->comida.x && p->cuerpo[0].y == p->comida.y) {
-            p->puntaje += 10;
-            if (p->largo < MAX_COLA - 1) p->largo++;
-            p->comida.x = rand() % ANCHO;
-            p->comida.y = rand() % ALTO;
+        /* Colisión con comida */
+        if (partida.cuerpo[0].x == partida.comida.x && partida.cuerpo[0].y == partida.comida.y) {
+            partida.puntaje += 10;
+            if (partida.largo < MAX_COLA - 1) partida.largo++;
+            partida.comida.x = rand() % ANCHO;
+            partida.comida.y = rand() % ALTO;
         }
+        pthread_mutex_unlock(&mutex_partida);
     }
+
     modo_juego(0);
+    jugando = 0;
+    pthread_join(hilo, NULL);
 }
 
 void juego_menu(void) {
@@ -223,7 +294,7 @@ void juego_menu(void) {
                 if (!seg_verificar(OBJ_PARTIDAS, D_READ)) break;
                 Partida p;
                 if (cargar_partida(seg_usuario_actual(), &p) == 0) {
-                    printf("Cargando partida guardada de %s...\n", p.jugador);
+                    printf("Cargando partida guardada de %s (Puntaje previo: %d)...\n", p.jugador, p.puntaje);
                     ejecutar_partida(&p);
                 } else {
                     printf("No existe partida guardada para el usuario '%s'.\n", seg_usuario_actual());

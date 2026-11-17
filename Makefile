@@ -15,6 +15,6 @@ clean:
 	rm -rf build minios
 
 distclean: clean
-	rm -rf datos/minios.disk datos/partida_*.sav datos/matriz.dat
+	rm -rf datos/minios.disk datos/minios_espejo.disk datos/partida_*.sav datos/matriz.dat datos/usuarios.dat datos/bitacora.log
 
 .PHONY: clean distclean

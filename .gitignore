@@ -1,5 +1,3 @@
 build/
 minios
-datos/minios.disk
-datos/matriz.dat
-datos/partida_*.sav
+datos/
